@@ -1,74 +1,77 @@
 import numpy as np
-from scipy.linalg import (blas, lapack)
+from scipy.linalg import blas, lapack
 
-def ab01nd(jobz, n, m, a, lda, b, ldb, tol=0.0):
-    zero = np.float64(0.0)
-    one = np.float64(1.0)
+def ab01nd(jobz, n, m, a, lda, b, ldb, ncont, indcon, nblk, z, ldz, tau, tol, iwork, dwork, ldwork):
+    # .. Parameters ..
+    zero, one = 0.0, 1.0
+    
+    # .. Local Scalars ..
+    ljobf = jobz.upper() == 'F'
+    ljobi = jobz.upper() == 'I'
+    ljobz = ljobf or ljobi
 
+    # .. External Functions ..
+    def lsame(a, b):
+        return a.upper() == b.upper()
+    
+    dlange = lapack.get_lapack_funcs("dlange", [a,])
+    dlacpy = lapack.get_lapack_funcs("dlacpy", [a,])
+    dorgqr = lapack.get_lapack_funcs("dorgqr", [a,])
+    dcopy = blas.get_blas_funcs("copy", [a,])
+    dlaset = blas.get_blas_funcs("laset", [a,])
+    dormqr = lapack.get_lapack_funcs("dormqr", [a,])
+    mb01pd = blas.get_blas_funcs("mb01pd", [a,])
+    mb03oy = blas.get_blas_funcs("mb03oy", [a,])
+    xerbla = blas.get_blas_funcs("xerbla", [a,])
+
+    # .. Executable Statements ..
     # Test the input scalar arguments.
-    if jobz not in ['N', 'F', 'I']:
-        raise ValueError("JOBZ must be 'N', 'F', or 'I'")
-    if n < 0:
-        raise ValueError("N must be non-negative")
-    if m < 0:
-        raise ValueError("M must be non-negative")
-    if lda < max(1, n):
-        raise ValueError("LDA must be at least max(1, N)")
-    if ldb < max(1, n):
-        raise ValueError("LDB must be at least max(1, N)")
+    info = 0
+    if not ljobz and jobz.upper() != 'N':
+        info = -1
+    elif n < 0:
+        info = -2
+    elif m < 0:
+        info = -3
+    elif lda < max(1, n):
+        info = -5
+    elif ldb < max(1, n):
+        info = -7
+    elif ldz < 1 or (ljobz and ldz < n):
+        info = -12
+    elif ldwork < max(1, n, 3 * m):
+        info = -17
+
+    if info != 0:
+        xerbla("AB01ND", -info)
+        return info
 
     ncont = 0
     indcon = 0
-    ljobf = jobz in ['F']
-    ljobi = jobz in ['I']
-    ljobz = ljobf or ljobi
 
     # Quick return if possible.
     if min(n, m) == 0:
         if n > 0:
-            z = np.zeros((n, n))
-            tau = np.zeros(n)
             if ljobi:
-                np.fill_diagonal(z, 1.0)
-            dwork = np.array([one], dtype=np.float64)
-        else:
-            z = np.empty((0,0), dtype=np.float64)
-            tau = np.empty(0, dtype=np.float64)
-            dwork = np.array([one], dtype=np.float64)
-        return z, tau, dwork
+                z[:n, :n] = np.eye(n)
+            elif ljobf:
+                z[:n, :n] = np.zeros((n, n))
+                np.fill_diagonal(tau, 0.0)
+        dwork[0] = one
+        return 0
 
     # Calculate the absolute norms of A and B (used for scaling).
-    anorm = blas.dlange('M', n, n, a, lda)
-    bnorm = blas.dlange('M', n, m, b, ldb)
+    anorm = dlange("M", a, n=n, m=n, lwork=1)
+    bnorm = dlange("M", b, n=n, m=m, lwork=1)
 
     # Return if matrix B is zero.
     if bnorm == zero:
-        z = np.zeros((n, n))
-        tau = np.zeros(n)
         if ljobi:
-            np.fill_diagonal(z, 1.0)
-        dwork = np.array([one], dtype=np.float64)
-        return z, tau, dwork
+            z[:n, :n] = np.eye(n)
+        elif ljobf:
+            z[:n, :n] = np.zeros((n, n))
+            np.fill_diagonal(tau, 0.0)
+        dwork[0] = one
+        return 0
 
-    # Scale (if needed) the matrices A and B.
-    nblk = np.zeros(n, dtype=np.int32)
-    info = np.zeros(1, dtype=np.int32)
-    lapack.mb01pd('Scale', 'G', n, n, 0, 0, anorm, 0, nblk, a, lda, info)
-    lapack.mb01pd('Scale', 'G', n, m, 0, 0, bnorm, 0, nblk, b, ldb, info)
-
-    # Compute the Frobenius norm of [B A] (used for rank estimation).
-    fnrm = blas.dlange('F', n, m, b, ldb)
-
-    toldef = tol
-    if toldef <= zero:
-        toldef = np.float64(n*n) * lapack.dlamch('Precision')
-
-    wrkopt = np.int32(1)
-    ni = np.int32(0)
-    itau = np.int32(0)
-    ncrt = np.int32(n)
-    mcrt = np.int32(m)
-    iqr = np.int32(0)
-
-    while True:
-        # Rank-revealing QR decomposition with column pivoting.
+    # Scale (
